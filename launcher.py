@@ -225,7 +225,44 @@ def draw_hud(
     return frame
 
 
-def run_launcher(
+def ask_password_failsafe(target_app: str = DEFAULT_APP) -> bool:
+    """Displays a native macOS password prompt dialog using AppleScript."""
+    apple_script = f'''
+    try
+        set dialogResult to display dialog "Biometric authentication failed for {target_app}.\\nEnter passcode to unlock:" default answer "" with hidden answer with title "Biometric Launcher Passcode Failsafe" with icon caution buttons {{"Cancel", "Unlock"}} default button "Unlock"
+        return text returned of dialogResult
+    on error number -128
+        return ""
+    end try
+    '''
+    failsafe_passcode = os.environ.get("GUARD_PASSCODE", "0713")
+    try:
+        output = subprocess.check_output(
+            ["osascript", "-e", apple_script],
+            text=True,
+        ).strip()
+        if output == failsafe_passcode:
+            print("[Launcher] Passcode correct! Unlocking...")
+            return True
+        else:
+            if output:
+                print("[Launcher] Incorrect passcode entered.")
+                subprocess.run(
+                    [
+                        "osascript",
+                        "-e",
+                        'display notification "Incorrect passcode." with title "Biometric Launcher"',
+                    ]
+                )
+            else:
+                print("[Launcher] Passcode entry cancelled.")
+            return False
+    except Exception as e:
+        print(f"[Launcher] Passcode dialog error: {e}", file=sys.stderr)
+        return False
+
+
+def authenticate_face(
     target_app: str = DEFAULT_APP,
     authorized_image_path: str = DEFAULT_AUTH_IMAGE,
     tolerance: float = DEFAULT_TOLERANCE,
@@ -233,35 +270,23 @@ def run_launcher(
     camera_id: int = 0,
     timeout: float = 60.0,
     headless: bool = False,
-    dry_run: bool = False,
-) -> int:
-    """Main biometric launcher loop."""
-    print("=" * 60)
-    print("           macOS Biometric Application Launcher")
-    print("=" * 60)
-    print(f"  Target Application : {target_app}")
-    print(f"  Authorized Photo   : {authorized_image_path}")
-    print(f"  Face Tolerance     : {tolerance}")
-    print(f"  EAR Threshold      : {ear_threshold}")
-    print("=" * 60)
+) -> bool:
+    """Verifies user identity and natural blink liveness via webcam.
 
-    # Verify authorized image exists
-    if not os.path.exists(authorized_image_path):
-        print(f"\n[ERROR] Authorized reference image not found at '{authorized_image_path}'.", file=sys.stderr)
-        print("Please place your reference photo at data/authorized/me.jpg, or enroll using:", file=sys.stderr)
-        print("    python launcher.py --register\n", file=sys.stderr)
-        return 1
-
+    Returns:
+        bool: Strictly True upon successful face match AND blink verification,
+              False on timeout, cancellation, or failure.
+    """
     print("[INFO] Loading authorized biometric profile...")
     auth_encoding = load_authorized_encoding(authorized_image_path)
     if auth_encoding is None:
-        return 1
+        return False
     print("[INFO] Authorized profile loaded successfully.")
 
     cap = cv2.VideoCapture(camera_id)
     if not cap.isOpened():
         print(f"[ERROR] Could not access camera (id={camera_id}).", file=sys.stderr)
-        return 1
+        return False
 
     detector = LivenessDetector(ear_threshold=ear_threshold)
 
@@ -270,7 +295,6 @@ def run_launcher(
     is_face_match = False
     face_distance: Optional[float] = None
     blink_confirmed = False
-    success_triggered = False
 
     print("\n[INFO] Starting camera feed. Look into camera and blink to authenticate...")
 
@@ -278,7 +302,7 @@ def run_launcher(
         while True:
             if timeout > 0 and (time.time() - start_time) > timeout:
                 print(f"[TIMEOUT] Authentication timed out after {timeout} seconds.", file=sys.stderr)
-                return 2
+                return False
 
             ret, frame = cap.read()
             if not ret or frame is None:
@@ -317,13 +341,12 @@ def run_launcher(
                     print(f"[LIVENESS] Natural blink confirmed! (EAR: {liveness.ear_avg:.3f})")
 
             # 4. Check if both criteria met
-            if is_face_match and blink_confirmed and not success_triggered:
-                success_triggered = True
+            if is_face_match and blink_confirmed:
                 print("\n[MATCH] Identity match confirmed AND natural blink verified!")
 
                 if not headless:
                     # Show success frame briefly
-                    frame = draw_hud(
+                    display_frame = draw_hud(
                         frame,
                         target_app,
                         is_face_match,
@@ -332,15 +355,17 @@ def run_launcher(
                         blink_confirmed,
                         success=True,
                     )
-                    cv2.imshow("macOS Biometric Launcher", frame)
+                    cv2.imshow("macOS Biometric Launcher", display_frame)
                     cv2.waitKey(500)
 
-                if not dry_run:
-                    launch_application(target_app)
-                else:
-                    print(f"[DRY-RUN] Would execute: open -a '{target_app}'")
+                # Release all camera resources immediately upon match
+                cap.release()
+                detector.close()
+                if not headless:
+                    cv2.destroyAllWindows()
+                    cv2.waitKey(1)
 
-                return 0
+                return True
 
             # 5. Render GUI if not headless
             if not headless:
@@ -358,7 +383,7 @@ def run_launcher(
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord("q"):
                     print("[INFO] Authentication cancelled by user.")
-                    return 3
+                    return False
             else:
                 # Terminal log in headless mode
                 if frame_counter % 30 == 0:
@@ -366,10 +391,74 @@ def run_launcher(
                     print(f"[STATUS] {status_str}")
 
     finally:
+        # Guarantee resources are cleaned up if exited without return True
         cap.release()
         detector.close()
         if not headless:
             cv2.destroyAllWindows()
+            cv2.waitKey(1)
+
+    return False
+
+
+def run_launcher(
+    target_app: str = DEFAULT_APP,
+    authorized_image_path: str = DEFAULT_AUTH_IMAGE,
+    tolerance: float = DEFAULT_TOLERANCE,
+    ear_threshold: float = DEFAULT_EAR_THRESHOLD,
+    camera_id: int = 0,
+    timeout: float = 60.0,
+    headless: bool = False,
+    dry_run: bool = False,
+    enable_failsafe: bool = False,
+) -> int:
+    """Main biometric launcher loop."""
+    print("=" * 60)
+    print("           macOS Biometric Application Launcher")
+    print("=" * 60)
+    print(f"  Target Application : {target_app}")
+    print(f"  Authorized Photo   : {authorized_image_path}")
+    print(f"  Face Tolerance     : {tolerance}")
+    print(f"  EAR Threshold      : {ear_threshold}")
+    print("=" * 60)
+
+    # Verify authorized image exists
+    if not os.path.exists(authorized_image_path):
+        print(f"\n[ERROR] Authorized reference image not found at '{authorized_image_path}'.", file=sys.stderr)
+        print("Please place your reference photo at data/authorized/me.jpg, or enroll using:", file=sys.stderr)
+        print("    python launcher.py --register\n", file=sys.stderr)
+        return 1
+
+    auth_success = authenticate_face(
+        target_app=target_app,
+        authorized_image_path=authorized_image_path,
+        tolerance=tolerance,
+        ear_threshold=ear_threshold,
+        camera_id=camera_id,
+        timeout=timeout,
+        headless=headless,
+    )
+
+    if auth_success:
+        # Camera resources are already released by authenticate_face()
+        if not dry_run:
+            launch_application(target_app)
+        else:
+            print(f"[DRY-RUN] Would execute: open -a '{target_app}'")
+        return 0
+
+    # Guarded failsafe invocation: ONLY executed if authenticate_face() evaluates to False
+    if enable_failsafe:
+        print("[Launcher] Biometric check failed or timed out. Triggering passcode failsafe...")
+        failsafe_success = ask_password_failsafe(target_app)
+        if failsafe_success:
+            if not dry_run:
+                launch_application(target_app)
+            else:
+                print(f"[DRY-RUN] Would execute: open -a '{target_app}'")
+            return 0
+
+    return 2 if timeout > 0 else 1
 
 
 def parse_args(args: Optional[list] = None) -> argparse.Namespace:
@@ -434,6 +523,11 @@ def parse_args(args: Optional[list] = None) -> argparse.Namespace:
         action="store_true",
         help="Verify credentials and blink without actually launching the application.",
     )
+    parser.add_argument(
+        "--failsafe",
+        action="store_true",
+        help="Enable passcode failsafe dialog if biometric verification fails or times out.",
+    )
     return parser.parse_args(args)
 
 
@@ -456,6 +550,7 @@ def main() -> None:
         timeout=args.timeout,
         headless=args.headless,
         dry_run=args.dry_run,
+        enable_failsafe=args.failsafe,
     )
     sys.exit(code)
 

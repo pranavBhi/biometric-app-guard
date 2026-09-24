@@ -36,13 +36,13 @@
 	<key>NSCalendarsUsageDescription</key>
 	<string>This script needs access to your calendars to run.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Biometric facial recognition to protect applications</string>
+	<string>Biometric App Guard requires camera access for facial recognition authentication.</string>
 	<key>NSContactsUsageDescription</key>
 	<string>This script needs access to your contacts to run.</string>
 	<key>NSHomeKitUsageDescription</key>
 	<string>This script needs access to your HomeKit Home to run.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>This script needs access to your microphone to run.</string>
+	<string>Hardware requirement.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>This script needs access to your photos to run.</string>
 	<key>NSRemindersUsageDescription</key>

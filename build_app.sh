@@ -36,8 +36,11 @@ rm -rf "$LOCAL_APP_PATH"
 
 # 2. Compile native AppleScript applet with osacompile
 echo "[1/4] Compiling applet using osacompile..."
-# The AppleScript executes the python guard script detached in background
-APPLE_SCRIPT="do shell script \"'$PYTHON_BIN' '$SCRIPT_PATH' > /dev/null 2>&1 &\""
+# The AppleScript activates BiometricGuard or starts the python guard script if not already running
+APPLE_SCRIPT="set isRunning to (do shell script \"pgrep -f 'python.*app_guard.py' || true\")
+if isRunning is \"\" then
+    do shell script \"cd '$PROJECT_DIR' && '$PYTHON_BIN' '$SCRIPT_PATH' > /dev/null 2>&1 &\"
+end if"
 osacompile -o "$LOCAL_APP_PATH" -e "$APPLE_SCRIPT"
 
 # 3. Inject Info.plist properties
@@ -45,8 +48,12 @@ echo "[2/4] Updating Info.plist configuration..."
 PLIST="$LOCAL_APP_PATH/Contents/Info.plist"
 
 # Add/Set NSCameraUsageDescription for native Camera access permission
-/usr/libexec/PlistBuddy -c "Set :NSCameraUsageDescription 'Biometric facial recognition to protect applications'" "$PLIST" 2>/dev/null || \
-/usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'Biometric facial recognition to protect applications'" "$PLIST"
+/usr/libexec/PlistBuddy -c "Set :NSCameraUsageDescription 'Biometric App Guard requires camera access for facial recognition authentication.'" "$PLIST" 2>/dev/null || \
+/usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'Biometric App Guard requires camera access for facial recognition authentication.'" "$PLIST"
+
+# Add/Set NSMicrophoneUsageDescription
+/usr/libexec/PlistBuddy -c "Set :NSMicrophoneUsageDescription 'Hardware requirement.'" "$PLIST" 2>/dev/null || \
+/usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'Hardware requirement.'" "$PLIST"
 
 # Add/Set LSUIElement = true to run headlessly as an agent without a Dock icon
 /usr/libexec/PlistBuddy -c "Set :LSUIElement bool true" "$PLIST" 2>/dev/null || \
@@ -56,16 +63,17 @@ PLIST="$LOCAL_APP_PATH/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier 'com.user.biometricguard'" "$PLIST" 2>/dev/null || \
 /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string 'com.user.biometricguard'" "$PLIST"
 
-# 4. Ad-hoc codesign the bundle so macOS recognizes valid signature
+# 4. Ad-hoc codesign the bundle so macOS recognizes valid signature with entitlements
 echo "[3/4] Signing application bundle..."
-codesign --force --deep --sign - "$LOCAL_APP_PATH"
+ENTITLEMENTS_PATH="$PROJECT_DIR/entitlements.plist"
+codesign --force --deep --sign - --entitlements "$ENTITLEMENTS_PATH" "$LOCAL_APP_PATH"
 
 # 5. Optionally install to /Applications if writable
 echo "[4/4] Deploying application..."
 if [ -w "/Applications" ]; then
     rm -rf "$APPLICATIONS_PATH"
     cp -R "$LOCAL_APP_PATH" "/Applications/"
-    codesign --force --deep --sign - "$APPLICATIONS_PATH" 2>/dev/null || true
+    codesign --force --deep --sign - --entitlements "$ENTITLEMENTS_PATH" "$APPLICATIONS_PATH" 2>/dev/null || true
     echo "[SUCCESS] Installed to $APPLICATIONS_PATH"
 else
     echo "[INFO] /Applications is not writable without sudo; keeping app at $LOCAL_APP_PATH"

@@ -1,6 +1,8 @@
 venv/
 *.pyc
 __pycache__/
+*.lock
+/tmp/
+BiometricGuard.app/
 .DS_Store
-data/authorized/*
-!data/authorized/.gitkeep
+data/authorized/

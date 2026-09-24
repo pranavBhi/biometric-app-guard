@@ -1,7 +1,11 @@
-"""Unit tests for EAR calculation, BlinkDetector, and liveness verification."""
-
+import os
+import sys
 import unittest
 import numpy as np
+
+# Ensure project root is in sys.path when running script directly
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from utils.liveness import (
     calculate_ear,
     is_blinking,
@@ -143,6 +147,108 @@ class TestLiveness(unittest.TestCase):
             result = detector.process_frame(blank_frame)
             self.assertFalse(result.face_detected)
             self.assertEqual(result.total_blinks, 0)
+
+    def test_calculate_ear_mediapipe_protobuf_container(self):
+        """Test RepeatedCompositeContainer directly from mediapipe landmark_pb2."""
+        from mediapipe.framework.formats import landmark_pb2
+
+        nll = landmark_pb2.NormalizedLandmarkList()
+        # Create at least 468 landmark points
+        for _ in range(468):
+            lm = nll.landmark.add()
+            lm.x = 0.5
+            lm.y = 0.5
+
+        # Populate LEFT_EYE_INDICES with synthetic open eye coordinates
+        w, h = 640, 480
+        test_points = {
+            LEFT_EYE_INDICES[0]: (10.0 / w, 20.0 / h),  # p1
+            LEFT_EYE_INDICES[1]: (20.0 / w, 15.0 / h),  # p2
+            LEFT_EYE_INDICES[2]: (40.0 / w, 15.0 / h),  # p3
+            LEFT_EYE_INDICES[3]: (50.0 / w, 20.0 / h),  # p4
+            LEFT_EYE_INDICES[4]: (40.0 / w, 25.0 / h),  # p5
+            LEFT_EYE_INDICES[5]: (20.0 / w, 25.0 / h),  # p6
+        }
+        for idx, (x, y) in test_points.items():
+            nll.landmark[idx].x = x
+            nll.landmark[idx].y = y
+
+        # Test passing RepeatedCompositeContainer directly: nll.landmark
+        repeated_container = nll.landmark
+        ear = calculate_ear(repeated_container, LEFT_EYE_INDICES, image_width=w, image_height=h)
+        self.assertAlmostEqual(ear, 0.25, places=4)
+
+        # Test passing NormalizedLandmarkList directly: nll
+        ear_nll = calculate_ear(nll, LEFT_EYE_INDICES, image_width=w, image_height=h)
+        self.assertAlmostEqual(ear_nll, 0.25, places=4)
+
+    def test_is_blinking_with_protobuf_container(self):
+        """Verify is_blinking works with protobuf RepeatedCompositeContainer without error."""
+        from mediapipe.framework.formats import landmark_pb2
+
+        nll = landmark_pb2.NormalizedLandmarkList()
+        for _ in range(468):
+            lm = nll.landmark.add()
+            lm.x = 0.5
+            lm.y = 0.5
+
+        w, h = 640, 480
+        # Closed eye coordinates: top at 19.5/h, bottom at 20.5/h
+        for idx in LEFT_EYE_INDICES:
+            nll.landmark[idx].x = 20.0 / w
+            nll.landmark[idx].y = 20.0 / h
+        nll.landmark[LEFT_EYE_INDICES[0]].x = 10.0 / w
+        nll.landmark[LEFT_EYE_INDICES[3]].x = 50.0 / w
+        nll.landmark[LEFT_EYE_INDICES[1]].y = 19.5 / h
+        nll.landmark[LEFT_EYE_INDICES[2]].y = 19.5 / h
+        nll.landmark[LEFT_EYE_INDICES[4]].y = 20.5 / h
+        nll.landmark[LEFT_EYE_INDICES[5]].y = 20.5 / h
+
+        for idx in RIGHT_EYE_INDICES:
+            nll.landmark[idx].x = 80.0 / w
+            nll.landmark[idx].y = 20.0 / h
+        nll.landmark[RIGHT_EYE_INDICES[0]].x = 70.0 / w
+        nll.landmark[RIGHT_EYE_INDICES[3]].x = 110.0 / w
+        nll.landmark[RIGHT_EYE_INDICES[1]].y = 19.5 / h
+        nll.landmark[RIGHT_EYE_INDICES[2]].y = 19.5 / h
+        nll.landmark[RIGHT_EYE_INDICES[4]].y = 20.5 / h
+        nll.landmark[RIGHT_EYE_INDICES[5]].y = 20.5 / h
+
+        is_closed, ear = is_blinking(nll.landmark, frame_w=w, frame_h=h)
+        self.assertTrue(is_closed)
+        self.assertAlmostEqual(ear, 0.025, places=4)
+
+    def test_calculate_ear_zero_horizontal_distance(self):
+        """Test calculate_ear does not divide by zero when horizontal distance is zero."""
+        landmarks = {idx: (10.0, 10.0) for idx in LEFT_EYE_INDICES}
+        ear = calculate_ear(landmarks, LEFT_EYE_INDICES)
+        self.assertEqual(ear, 0.0)
+
+    def test_duck_typed_custom_container(self):
+        """Verify duck typing allows custom container objects with subscript indexing."""
+        class MockLandmark:
+            def __init__(self, x, y):
+                self.x = x
+                self.y = y
+
+        class MockLandmarkContainer:
+            def __init__(self, points):
+                self._points = points
+            def __getitem__(self, idx):
+                return self._points[idx]
+
+        w, h = 640, 480
+        points = {
+            LEFT_EYE_INDICES[0]: MockLandmark(10.0 / w, 20.0 / h),
+            LEFT_EYE_INDICES[1]: MockLandmark(20.0 / w, 15.0 / h),
+            LEFT_EYE_INDICES[2]: MockLandmark(40.0 / w, 15.0 / h),
+            LEFT_EYE_INDICES[3]: MockLandmark(50.0 / w, 20.0 / h),
+            LEFT_EYE_INDICES[4]: MockLandmark(40.0 / w, 25.0 / h),
+            LEFT_EYE_INDICES[5]: MockLandmark(20.0 / w, 25.0 / h),
+        }
+        container = MockLandmarkContainer(points)
+        ear = calculate_ear(container, LEFT_EYE_INDICES, image_width=w, image_height=h)
+        self.assertAlmostEqual(ear, 0.25, places=4)
 
 
 if __name__ == "__main__":

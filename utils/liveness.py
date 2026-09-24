@@ -52,17 +52,45 @@ def euclidean_distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> floa
     return float(dist.euclidean(p1, p2))
 
 
-def extract_point(landmark: Any, w: float = 1.0, h: float = 1.0) -> List[float]:
-    """Extracts (x, y) coordinates whether landmark is an object or a dict/list."""
-    scale_x = float(w) if w else 1.0
-    scale_y = float(h) if h else 1.0
+def extract_point(
+    landmark: Any,
+    w: Optional[float] = None,
+    h: Optional[float] = None,
+) -> Tuple[float, float]:
+    """Safely extracts coordinates from each landmark point.
+
+    Supports objects with .x and .y attributes (e.g. MediaPipe landmarks),
+    tuples/lists, and dictionaries with 'x' and 'y' keys.
+    """
+    scale_w = float(w) if w is not None else 1.0
+    scale_h = float(h) if h is not None else 1.0
+
     if hasattr(landmark, "x") and hasattr(landmark, "y"):
-        return [landmark.x * scale_x, landmark.y * scale_y]
+        raw_x = landmark.x
+        raw_y = landmark.y
     elif isinstance(landmark, (list, tuple)):
-        return [landmark[0] * scale_x, landmark[1] * scale_y]
+        raw_x = landmark[0]
+        raw_y = landmark[1]
     elif isinstance(landmark, dict):
-        return [landmark["x"] * scale_x, landmark["y"] * scale_y]
-    raise ValueError(f"Unknown landmark point format: {type(landmark)}")
+        raw_x = landmark["x"]
+        raw_y = landmark["y"]
+    else:
+        try:
+            raw_x = landmark[0]
+            raw_y = landmark[1]
+        except Exception:
+            raise ValueError(f"Unknown landmark point format: {type(landmark)}")
+
+    scaled_x = raw_x * scale_w
+    scaled_y = raw_y * scale_h
+
+    # Convert to int with round(..., 5) to eliminate float32 precision artifacts (e.g. 24.9999994 -> 25)
+    if w is not None and h is not None:
+        return (int(round(scaled_x, 5)), int(round(scaled_y, 5)))
+    elif scaled_x > 1.0 or scaled_y > 1.0:
+        return (int(round(scaled_x, 5)), int(round(scaled_y, 5)))
+    else:
+        return (float(scaled_x), float(scaled_y))
 
 
 def calculate_ear(
@@ -71,33 +99,47 @@ def calculate_ear(
     image_width: Optional[int] = None,
     image_height: Optional[int] = None,
 ) -> float:
-    """Calculates Eye Aspect Ratio (EAR) accepting native MediaPipe protobuf or list/dict."""
+    """Calculates Eye Aspect Ratio (EAR) accepting native MediaPipe protobuf or list/dict.
+
+    Duck-types indexing into landmarks container (such as protobuf
+    RepeatedCompositeContainer, NormalizedLandmarkList, list, or dict)
+    and computes EAR via NumPy Euclidean distances without division-by-zero errors.
+    """
     pts = []
-    scale_w = float(image_width) if image_width else 1.0
-    scale_h = float(image_height) if image_height else 1.0
+
+    # Duck-type access into container:
+    # If landmarks has a .landmark attribute (e.g. NormalizedLandmarkList), access it;
+    # otherwise access landmarks directly (e.g. RepeatedCompositeContainer, list, dict)
+    container = landmarks.landmark if hasattr(landmarks, "landmark") else landmarks
 
     for idx in eye_indices:
-        if hasattr(landmarks, "landmark"):
-            lm = landmarks.landmark[idx]
-        elif isinstance(landmarks, (list, tuple, dict)):
-            lm = landmarks[idx]
-        else:
-            raise ValueError(f"Unsupported landmarks structure: {type(landmarks)}")
-        pts.append(extract_point(lm, scale_w, scale_h))
+        try:
+            lm = container[idx]
+        except (TypeError, KeyError, IndexError) as e:
+            try:
+                lm = landmarks[idx]
+            except Exception:
+                raise ValueError(
+                    f"Unsupported landmarks structure or missing index {idx}: {type(landmarks)}"
+                ) from e
+        pts.append(extract_point(lm, w=image_width, h=image_height))
 
     pts_arr = np.array(pts, dtype=np.float64)
 
-    # Vertical eye distances
-    v1 = dist.euclidean(pts_arr[1], pts_arr[5])
-    v2 = dist.euclidean(pts_arr[2], pts_arr[4])
+    # Vertical eye distances:
+    # v1 = distance between p2 (pts_arr[1]) and p6 (pts_arr[5])
+    # v2 = distance between p3 (pts_arr[2]) and p4 (pts_arr[4])
+    v1 = np.linalg.norm(pts_arr[1] - pts_arr[5])
+    v2 = np.linalg.norm(pts_arr[2] - pts_arr[4])
 
-    # Horizontal eye distance
-    h = dist.euclidean(pts_arr[0], pts_arr[3])
+    # Horizontal eye distance:
+    # horiz = distance between p1 (pts_arr[0]) and p4 (pts_arr[3])
+    horiz = np.linalg.norm(pts_arr[0] - pts_arr[3])
 
-    if h == 0.0:
+    if horiz <= 1e-6:
         return 0.0
 
-    return float((v1 + v2) / (2.0 * h))
+    return float((v1 + v2) / (2.0 * horiz))
 
 
 def is_blinking(
